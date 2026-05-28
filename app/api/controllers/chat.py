@@ -7,7 +7,7 @@ from app.services import llm_service
 
 router = APIRouter(prefix="/api")
 
-@router.get("/api/conversation/new")
+@router.get("/conversation/new")
 async def start_new_chat_session(db: Session = Depends(get_db)):
     try:
         new_conv_id = crud_chat.create_new_conversation(db)
@@ -16,7 +16,7 @@ async def start_new_chat_session(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/chat")
+@router.post("/chat")
 async def process_chatbot_message(payload: UserPayload, db: Session = Depends(get_db)):
     try:
         bot_reply=llm_service.generate_bot_reply(db,payload)
