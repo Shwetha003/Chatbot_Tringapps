@@ -12,7 +12,7 @@ class UserPayload(BaseModel):
     def as_form(
         cls,
         conversation_id: int = Form(...),
-        session_id: str = Form(...),
+        session_id: int = Form(...),
         message: Optional[str] = Form(None)
     ):
         return cls(

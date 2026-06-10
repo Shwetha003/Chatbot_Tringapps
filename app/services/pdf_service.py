@@ -6,17 +6,28 @@ import os
 from paddleocr import PPStructure
 from groq import AsyncGroq
 import numpy as np
+from bs4 import BeautifulSoup
+
+
+from app.models.document import PageData, TableData, FigureData
 
 groq_client = AsyncGroq()
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct" 
-structure_engine = PPStructure(show_log=False, lang='en', enable_mkldnn=False)
+
+# Lazy singleton — initialised only on first PDF request, not at import time
+_structure_engine = None
+ 
+def _get_structure_engine():
+    global _structure_engine
+    if _structure_engine is None:
+        _structure_engine = PPStructure(show_log=False, lang='en', enable_mkldnn=False)
+    return _structure_engine
+
 
 class PDFService:
     @classmethod
     async def route_pdf_pages(cls, file_bytes: bytes) -> list:
-        """
-        Analyzes pages and determines layout type flags
-        """
+        """ Analyzes pages and determines layout type flags """
         route_report = []
         
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -50,9 +61,7 @@ class PDFService:
     
     @classmethod
     async def _get_image_caption_from_groq(cls, base64_image_str: str) -> str:
-        """
-        Submits cropped image snippets directly to Groq Vision API for captioning
-        """
+        """Submits cropped image snippets directly to Groq Vision API for captioning """
         try:
             response = await groq_client.chat.completions.create(
                 model=VISION_MODEL,
@@ -73,6 +82,45 @@ class PDFService:
             print(f"[ERROR] Groq Vision API failed: {e}")
             return f"[Error generating image caption description: {str(e)}]"
 
+        # ------------------------------------------------------------------ #
+    #  HTML table → TableData                                              #
+    # ------------------------------------------------------------------ #
+ 
+    @classmethod
+    def _parse_html_table(cls, html: str) -> TableData:
+        """
+        Converts PaddleOCR's HTML table string into a structured TableData.
+        The first <tr> is treated as headers if it contains <th> elements,
+        otherwise the first row is used as headers.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        rows_raw = soup.find_all("tr")
+ 
+        if not rows_raw:
+            return TableData(headers=[], rows=[], raw_html=html)
+ 
+        headers: list[str] = []
+        rows: list[list[str]] = []
+ 
+        first_row = rows_raw[0]
+        th_cells = first_row.find_all("th")
+ 
+        if th_cells:
+            headers = [th.get_text(strip=True) for th in th_cells]
+            data_rows = rows_raw[1:]
+        else:
+            # No <th> — treat first row as header
+            td_cells = first_row.find_all("td")
+            headers = [td.get_text(strip=True) for td in td_cells]
+            data_rows = rows_raw[1:]
+ 
+        for tr in data_rows:
+            cells = tr.find_all(["td", "th"])
+            rows.append([c.get_text(strip=True) for c in cells])
+ 
+        return TableData(headers=headers, rows=rows, raw_html=html)
+
+
     @classmethod
     async def process_hybrid_page(cls, file_bytes: bytes, page_num: int) -> str:
         """
@@ -80,14 +128,14 @@ class PDFService:
         """
         print(f"--- [DEBUG] Starting Hybrid Processing for Page {page_num} ---")
         
-        supplementary_data = []
+        page_data = PageData(page_number=page_num, route="hybrid")
         
         # 1. Open the PDF from the raw uploaded bytes
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             page = pdf.pages[page_num - 1]
             
             # 2. Grab text naturally (pdfplumber preserves reading order beautifully)
-            clean_text = page.extract_text() or ""
+            page_data.text = page.extract_text() or ""
             
             # 3. Turn the page into an image array for PaddleOCR
             # resolution=150 is the perfect balance of speed and OCR accuracy
@@ -95,6 +143,7 @@ class PDFService:
             img_np = np.array(page_image)
             
             # 4. Run Stable PaddleOCR V2
+            structure_engine = _get_structure_engine()
             layout_results = structure_engine(img_np)
             
             for region in layout_results:
@@ -104,11 +153,15 @@ class PDFService:
                 # 1. Capture Structural Matrix Tables
                 if region_type == 'table' and 'res' in region:
                     html_table = region['res'].get('html', '')
-                    supplementary_data.append(f"\n[Extracted Structural Matrix Table]:\n{html_table}\n")
+                    if html_table:
+                        table_data = cls._parse_html_table(html_table)
+                        page_data.tables.append(table_data)
                 
                 # 2. Capture and Crop Visual Diagrams / Photos for Groq Vision
                 elif region_type == 'figure' and bbox:
-                    # Crop the PIL image directly
+                    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                        page_image = pdf.pages[page_num - 1].to_image(resolution=150).original
+
                     cropped_region = page_image.crop((bbox[0], bbox[1], bbox[2], bbox[3]))
                     buffered = io.BytesIO()
                     cropped_region.save(buffered, format="PNG")
@@ -124,11 +177,8 @@ class PDFService:
                         if isinstance(line, dict) and 'text' in line:
                             text_content += line['text'] + " "
                             
-                    if text_content.strip():
-                        supplementary_data.append(f"\n[Scanned OCR Text]:\n{text_content.strip()}\n")
+                    cleaned = text_content.strip()
+                    if cleaned:
+                        page_data.ocr_text_blocks.append(cleaned)
 
-        page_context = f"--- Document Page {page_num} Context ---\nTEXT ON PAGE:\n{clean_text}\n"
-        if supplementary_data:
-            page_context += "\nEXTRACTED VISUAL LAYOUT ELEMENTS:\n" + "\n".join(supplementary_data)
-            
-        return page_context
+        return page_data
