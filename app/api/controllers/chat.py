@@ -10,7 +10,7 @@ from app.models.document import PageData
 import io
 import pdfplumber
 import logging
- 
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
@@ -42,7 +42,7 @@ async def process_chatbot_message(
             if len(file_bytes) > MAX_PDF_BYTES:
                 raise HTTPException(status_code=413, detail="PDF exceeds 20 MB limit")
 
-            #Page Type Router
+            # Page Type Router
             page_report = await PDFService.route_pdf_pages(file_bytes)
             print(f"DEBUG - PDF Route Layout Report: {page_report}")
 
@@ -65,28 +65,43 @@ async def process_chatbot_message(
                         page_data = await PDFService.process_hybrid_page(file_bytes, page_num)
                         collected_pages.append(page_data)
 
-                    # "blank" pages are skipped entirely
- 
             # --- Convert to markdown + JSON ---
             pdf_markdown = DocumentConverter.to_markdown(collected_pages)
             pdf_json = DocumentConverter.to_json(collected_pages)
- 
+            
+            crud_chat.save_parsed_document_data(
+                db=db, 
+                conversation_id=payload.conversation_id, 
+                markdown_text=pdf_markdown, 
+                json_dict=pdf_json
+            )
             print(f"DEBUG - Parsed markdown length: {len(pdf_markdown)} chars")
             print(f"DEBUG - JSON page count: {len(pdf_json.get('pages', []))}")
- 
+
+            
+            try:
+                crud_chat.create_document_record(
+                    db=db,
+                    document_name=chat_file.filename,
+                    file_type="pdf",
+                    source_url=None,  # Set if handling URL inputs later
+                    chunk_count=len(collected_pages)  # Tracking total parsed pages as chunks for now
+                )
+                print(f"✅ Success - Logged metadata for {chat_file.filename} to database.")
+            except Exception as doc_err:
+                logger.warning(f"Failed to record document tracking metadata: {doc_err}")
+
         if not payload.message and chat_file:
             payload.message = "Analyze this uploaded document, summarize its contents, and tell me what actions I can take."
 
         # Pass compiled thread to Groq core layer
-
-        bot_reply=await llm_service.generate_bot_reply(db=db, payload=payload, context=pdf_markdown)
+        bot_reply = await llm_service.generate_bot_reply(db=db, payload=payload, context=pdf_markdown)
 
         return {
             "status": "success",
             "conversation_id": payload.conversation_id,
             "session_id": payload.session_id,
             "bot_reply": bot_reply,
-            # Returning the JSON structure lets the frontend use it later if needed
             "document_json": pdf_json if pdf_json else None,
         }
         
