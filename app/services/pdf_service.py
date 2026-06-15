@@ -126,6 +126,7 @@ class PDFService:
         """
         Combines Ordered Text, PaddleOCR Tables, and Groq Image Descriptions
         """
+        supplementary_data = []
         print(f"--- [DEBUG] Starting Hybrid Processing for Page {page_num} ---")
         
         page_data = PageData(page_number=page_num, route="hybrid")
