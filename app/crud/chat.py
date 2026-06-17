@@ -70,3 +70,25 @@ def get_chat_history(db: Session, conversation_id: int):
         .order_by(ChatMessage.created_at.asc())
         .all()
     )
+
+
+import json
+
+def save_chunk(
+    db: Session,
+    document_id: int,
+    chunk_content: str,
+    embedding=None
+):
+
+    new_chunk = Chunk(
+        doc_id=document_id,
+        chunk_content=chunk_content,
+        embedding=json.dumps(embedding) if embedding else None
+    )
+
+    db.add(new_chunk)
+    db.commit()
+    db.refresh(new_chunk)
+
+    return new_chunk
