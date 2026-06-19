@@ -35,8 +35,8 @@ class Chunk(Base):
     doc_id = Column(Integer, ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
     chunk_content = Column(Text, nullable=False)
     
-    # 1536 dimensions for embeddings
-    embedding = Column(Vector(1536) if Vector else Text, nullable=True) 
+    
+    embedding = Column(Text, nullable=True)
 
     # Relationships
     document = relationship("Document", back_populates="chunks")
